@@ -7,18 +7,13 @@ from fastapi import UploadFile
 
 from app.models.project import Project
 from app.utils.file_utils import save_uploaded_file, delete_physical_file
+from app.core.config import settings
 
-# Resolve project paths relative to this file
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-STORAGE_DIR = BASE_DIR / "storage"
-UPLOADS_DIR = STORAGE_DIR / "uploads"
-PROCESSED_DIR = STORAGE_DIR / "processed"
-TEMP_DIR = STORAGE_DIR / "temp"
+# Resolve project paths using configuration settings
+UPLOADS_DIR = Path(settings.UPLOAD_DIR)
+TEMP_DIR = Path(settings.TEMP_DIR)
+PROCESSED_DIR = Path(settings.STORAGE_ROOT) / "processed"
 
-# Ensure storage directories exist on load
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 def upload_file(db: Session, file: UploadFile, user_id: uuid.UUID) -> Project:
     """

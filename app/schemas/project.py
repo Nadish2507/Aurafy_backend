@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 class ProjectCreate(BaseModel):
@@ -12,6 +13,8 @@ class ProjectResponse(BaseModel):
     original_file_path: str
     original_file_url: str
     status: str
+    vocals_url: Optional[str] = None
+    instrumental_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

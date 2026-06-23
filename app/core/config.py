@@ -46,6 +46,12 @@ class Settings(BaseModel):
 
     SQLALCHEMY_DATABASE_URI: Optional[str] = None
 
+    STORAGE_ROOT: str = ""
+    UPLOAD_DIR: str = ""
+    TEMP_DIR: str = ""
+    VOCALS_DIR: str = ""
+    INSTRUMENTAL_DIR: str = ""
+
     model_config = {
         "arbitrary_types_allowed": True
     }
@@ -64,6 +70,31 @@ class Settings(BaseModel):
                 f"postgresql://{self.POSTGRES_USER}:{encoded_password}"
                 f"@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
             )
+
+        # Initialize storage directories
+        if not self.STORAGE_ROOT:
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            self.STORAGE_ROOT = os.getenv("STORAGE_ROOT", os.path.join(base_dir, "storage"))
+
+        self.STORAGE_ROOT = os.path.abspath(self.STORAGE_ROOT)
+        self.UPLOAD_DIR = os.path.abspath(os.getenv("UPLOAD_DIR", os.path.join(self.STORAGE_ROOT, "uploads")))
+        self.TEMP_DIR = os.path.abspath(os.getenv("TEMP_DIR", os.path.join(self.STORAGE_ROOT, "temp")))
+
+        processed_dir = os.path.join(self.STORAGE_ROOT, "processed")
+        self.VOCALS_DIR = os.path.abspath(os.getenv("VOCALS_DIR", os.path.join(processed_dir, "vocals")))
+        self.INSTRUMENTAL_DIR = os.path.abspath(os.getenv("INSTRUMENTAL_DIR", os.path.join(processed_dir, "instrumental")))
+
+        # Ensure directories exist
+        os.makedirs(self.STORAGE_ROOT, exist_ok=True)
+        os.makedirs(self.UPLOAD_DIR, exist_ok=True)
+        os.makedirs(self.TEMP_DIR, exist_ok=True)
+        os.makedirs(self.VOCALS_DIR, exist_ok=True)
+        os.makedirs(self.INSTRUMENTAL_DIR, exist_ok=True)
+
+        # Ensure FFmpeg bin directory is in PATH
+        ffmpeg_bin = r"C:\ffmpeg\ffmpeg-8.1.1-essentials_build\bin"
+        if os.path.exists(ffmpeg_bin) and ffmpeg_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
 
 
 settings = Settings()

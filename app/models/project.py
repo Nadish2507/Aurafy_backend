@@ -36,6 +36,14 @@ class Project(Base):
         default="UPLOADED",
         nullable=False
     )
+    vocals_url: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True
+    )
+    instrumental_url: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

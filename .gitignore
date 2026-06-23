@@ -27,3 +27,7 @@ storage/
 # OS Files
 Thumbs.db
 .DS_Store
+
+uvicorn.err.log
+uvicorn.out.log
+powershell.cmd

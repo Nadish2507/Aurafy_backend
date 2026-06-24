@@ -23,3 +23,9 @@ class ProjectResponse(BaseModel):
 class UploadResponse(BaseModel):
     message: str
     project: ProjectResponse
+
+class ProjectStatusResponse(BaseModel):
+    project_id: uuid.UUID
+    status: str
+    vocals_url: Optional[str] = None
+    instrumental_url: Optional[str] = None

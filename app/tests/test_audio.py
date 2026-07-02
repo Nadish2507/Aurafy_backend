@@ -195,7 +195,7 @@ def test_process_project_workflow_success(db: Session, test_user, sample_mp3, mo
     # Process
     processed_project = audio_service.process_project(db, project_id)
     
-    assert processed_project.status == "completed"
+    assert processed_project.status == "COMPLETED"
     assert processed_project.vocals_url == f"/api/v1/projects/file/vocals/{project_id}.wav"
     assert processed_project.instrumental_url == f"/api/v1/projects/file/instrumental/{project_id}.wav"
     
@@ -237,7 +237,7 @@ def test_process_project_workflow_failure(db: Session, test_user, test_files_dir
         audio_service.process_project(db, project_id)
         
     db.refresh(project)
-    assert project.status == "failed"
+    assert project.status == "FAILED"
     
     # Verify Job record is failed
     job = db.query(Job).filter(Job.original_filepath == str(invalid_path)).first()
@@ -246,3 +246,54 @@ def test_process_project_workflow_failure(db: Session, test_user, test_files_dir
     assert job.error_message is not None
     assert job.started_at is not None
     assert job.completed_at is not None
+
+def test_process_project_status_transitions(db: Session, test_user, sample_mp3, monkeypatch):
+    project_id = uuid.uuid4()
+    upload_path = Path(settings.UPLOAD_DIR) / f"upload_{project_id}.mp3"
+    shutil.copy(sample_mp3, upload_path)
+
+    project = Project(
+        id=project_id,
+        user_id=test_user.id,
+        filename="status_song.mp3",
+        original_file_path=str(upload_path),
+        original_file_url=f"/api/v1/projects/file/upload_{project_id}.mp3",
+        status="UPLOADED"
+    )
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+
+    observed_statuses = [project.status]
+    job = audio_service.create_pending_job(db, project)
+    observed_statuses.append(project.status)
+
+    original_convert_to_wav = audio_utils.convert_to_wav
+
+    def tracking_convert_to_wav(audio_to_convert: Path, temp_wav_path: Path) -> None:
+        db.refresh(project)
+        observed_statuses.append(project.status)
+        original_convert_to_wav(audio_to_convert, temp_wav_path)
+
+    def mock_main(opts):
+        out_dir = Path(opts[5])
+        wav_path = Path(opts[6])
+        track_name = wav_path.stem
+        vocals_dir = out_dir / "htdemucs" / track_name
+        vocals_dir.mkdir(parents=True, exist_ok=True)
+        (vocals_dir / "vocals.wav").write_bytes(b"mock vocals data")
+        (vocals_dir / "no_vocals.wav").write_bytes(b"mock instrumental data")
+
+    monkeypatch.setattr(audio_utils, "convert_to_wav", tracking_convert_to_wav)
+    monkeypatch.setattr(audio_service.demucs.separate, "main", mock_main)
+
+    processed_project = audio_service.process_project(db, project_id, job.id)
+    observed_statuses.append(processed_project.status)
+
+    assert observed_statuses == ["UPLOADED", "PENDING", "PROCESSING", "COMPLETED"]
+
+    db.refresh(job)
+    assert job.status == "COMPLETED"
+    upload_path.unlink(missing_ok=True)
+    Path(job.vocals_filepath).unlink(missing_ok=True)
+    Path(job.instrumental_filepath).unlink(missing_ok=True)

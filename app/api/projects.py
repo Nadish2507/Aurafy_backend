@@ -1,10 +1,11 @@
+import logging
 import uuid
 from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.core.deps import get_current_active_user
 from app.models.project import Project
 from app.models.user import User
@@ -14,6 +15,7 @@ from app.services import file_service
 from app.utils.file_utils import FileValidationError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _get_owned_project(
@@ -31,6 +33,39 @@ def _get_owned_project(
             detail="Project not found",
         )
     return project
+
+
+def _get_project_for_processing(
+    db: Session,
+    project_id: uuid.UUID,
+    current_user: User,
+) -> Project:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+    if project.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this project",
+        )
+    return project
+
+
+def _run_process_project_background(project_id: uuid.UUID, job_id: uuid.UUID) -> None:
+    db = SessionLocal()
+    try:
+        audio_service.process_project(db, project_id, job_id)
+    except Exception:
+        logger.exception(
+            "Background processing failed for project_id=%s job_id=%s",
+            project_id,
+            job_id,
+        )
+    finally:
+        db.close()
 
 
 @router.get("", response_model=List[ProjectResponse])
@@ -67,27 +102,47 @@ def get_project_status(
     )
 
 
-@router.post("/{project_id}/process", response_model=ProjectResponse)
+@router.post(
+    "/{project_id}/process",
+    response_model=ProjectResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def process_project(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ) -> Any:
-    project = _get_owned_project(db, project_id, current_user)
-    if project.status.lower() == "processing":
+    project = _get_project_for_processing(db, project_id, current_user)
+    project_status = audio_service.normalize_status(project.status)
+
+    if not audio_service.can_start_processing(project):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Project is already processing",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Project cannot be processed from status {project_status}",
         )
 
     try:
-        return audio_service.process_project(db, project_id)
+        job = audio_service.create_pending_job(db, project)
+        background_tasks.add_task(_run_process_project_background, project.id, job.id)
+        logger.info(
+            "Processing queued for project_id=%s user_id=%s job_id=%s",
+            project.id,
+            current_user.id,
+            job.id,
+        )
+        return project
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception(
+            "Failed to queue processing for project_id=%s user_id=%s",
+            project_id,
+            current_user.id,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process project: {str(e)}",
+            detail="Failed to start project processing",
         )
 
 
@@ -112,8 +167,9 @@ async def upload_project_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Upload failed for user_id=%s filename=%s", current_user.id, file.filename)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process file upload: {str(e)}"
+            detail="Failed to process file upload"
         )

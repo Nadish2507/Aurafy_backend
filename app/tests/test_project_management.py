@@ -8,13 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.api import projects as projects_api
 from app.core.config import settings
+from app.models.job import Job
 from app.models.project import Project
-from app.models.user import User
 
 
 @pytest.fixture
 def user_auth(client: TestClient) -> dict:
-    email = f"phase6_{uuid.uuid4().hex}@example.com"
+    email = f"phase7_{uuid.uuid4().hex}@example.com"
     password = "securepassword123"
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
     response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
@@ -28,7 +28,7 @@ def user_auth(client: TestClient) -> dict:
 
 @pytest.fixture
 def other_user_auth(client: TestClient) -> dict:
-    email = f"phase6_other_{uuid.uuid4().hex}@example.com"
+    email = f"phase7_other_{uuid.uuid4().hex}@example.com"
     password = "securepassword123"
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
     response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
@@ -117,7 +117,7 @@ def test_get_project_status(client: TestClient, db: Session, user_auth: dict) ->
     project = create_project(
         db,
         user_auth["user_id"],
-        status="completed",
+        status="COMPLETED",
         vocals_url="/api/v1/projects/file/vocals/test.wav",
         instrumental_url="/api/v1/projects/file/instrumental/test.wav",
     )
@@ -127,46 +127,69 @@ def test_get_project_status(client: TestClient, db: Session, user_auth: dict) ->
     assert response.status_code == 200
     assert response.json() == {
         "project_id": str(project.id),
-        "status": "completed",
+        "status": "COMPLETED",
         "vocals_url": "/api/v1/projects/file/vocals/test.wav",
         "instrumental_url": "/api/v1/projects/file/instrumental/test.wav",
     }
 
 
-def test_process_project_endpoint(client: TestClient, db: Session, user_auth: dict, monkeypatch) -> None:
-    project = create_project(db, user_auth["user_id"])
-
-    def mock_process_project(db_session: Session, project_id: uuid.UUID) -> Project:
-        processed = db_session.get(Project, project_id)
-        processed.status = "completed"
-        processed.vocals_url = f"/api/v1/projects/file/vocals/{project_id}.wav"
-        processed.instrumental_url = f"/api/v1/projects/file/instrumental/{project_id}.wav"
-        db_session.commit()
-        db_session.refresh(processed)
-        return processed
-
-    monkeypatch.setattr(projects_api.audio_service, "process_project", mock_process_project)
-
-    response = client.post(f"/api/v1/projects/{project.id}/process", headers=user_auth["headers"])
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "completed"
-    assert response.json()["vocals_url"] == f"/api/v1/projects/file/vocals/{project.id}.wav"
-
-
-def test_process_project_prevents_duplicate_processing(
+def test_start_processing_queues_background_task(
     client: TestClient,
     db: Session,
     user_auth: dict,
+    monkeypatch,
 ) -> None:
-    project = create_project(db, user_auth["user_id"], status="processing")
+    project = create_project(db, user_auth["user_id"])
+    queued = []
+
+    def fake_background(project_id: uuid.UUID, job_id: uuid.UUID) -> None:
+        queued.append((project_id, job_id))
+
+    monkeypatch.setattr(projects_api, "_run_process_project_background", fake_background)
 
     response = client.post(f"/api/v1/projects/{project.id}/process", headers=user_auth["headers"])
 
-    assert response.status_code == 409
+    assert response.status_code == 202
+    assert response.json()["status"] == "PENDING"
+    assert queued and queued[0][0] == project.id
+
+    db.refresh(project)
+    assert project.status == "PENDING"
+    job = db.get(Job, queued[0][1])
+    assert job is not None
+    assert job.status == "PENDING"
+    assert job.user_id == user_auth["user_id"]
 
 
-def test_process_project_enforces_ownership(
+def test_processing_invalid_project_returns_404(client: TestClient, user_auth: dict) -> None:
+    response = client.post(f"/api/v1/projects/{uuid.uuid4()}/process", headers=user_auth["headers"])
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("project_status", ["PENDING", "PROCESSING"])
+def test_duplicate_processing_returns_400(
+    client: TestClient,
+    db: Session,
+    user_auth: dict,
+    project_status: str,
+) -> None:
+    project = create_project(db, user_auth["user_id"], status=project_status)
+
+    response = client.post(f"/api/v1/projects/{project.id}/process", headers=user_auth["headers"])
+
+    assert response.status_code == 400
+
+
+def test_process_project_unauthorized_returns_401(client: TestClient, db: Session, user_auth: dict) -> None:
+    project = create_project(db, user_auth["user_id"])
+
+    response = client.post(f"/api/v1/projects/{project.id}/process")
+
+    assert response.status_code == 401
+
+
+def test_process_project_forbidden_for_other_user(
     client: TestClient,
     db: Session,
     user_auth: dict,
@@ -176,11 +199,39 @@ def test_process_project_enforces_ownership(
 
     response = client.post(f"/api/v1/projects/{project.id}/process", headers=other_user_auth["headers"])
 
-    assert response.status_code == 404
+    assert response.status_code == 403
+
+
+def test_completed_project_cannot_be_processed(client: TestClient, db: Session, user_auth: dict) -> None:
+    project = create_project(db, user_auth["user_id"], status="COMPLETED")
+
+    response = client.post(f"/api/v1/projects/{project.id}/process", headers=user_auth["headers"])
+
+    assert response.status_code == 400
+
+
+def test_background_task_execution_invokes_audio_service(db: Session, monkeypatch) -> None:
+    project_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    calls = []
+
+    class SessionFactory:
+        def __call__(self) -> Session:
+            return db
+
+    def fake_process_project(db_session: Session, queued_project_id: uuid.UUID, queued_job_id: uuid.UUID) -> None:
+        calls.append((db_session, queued_project_id, queued_job_id))
+
+    monkeypatch.setattr(projects_api, "SessionLocal", SessionFactory())
+    monkeypatch.setattr(projects_api.audio_service, "process_project", fake_process_project)
+
+    projects_api._run_process_project_background(project_id, job_id)
+
+    assert calls == [(db, project_id, job_id)]
 
 
 def test_download_vocals(client: TestClient, db: Session, user_auth: dict) -> None:
-    project = create_project(db, user_auth["user_id"], status="completed")
+    project = create_project(db, user_auth["user_id"], status="COMPLETED")
     file_path = Path(settings.VOCALS_DIR) / f"{project.id}.wav"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(b"vocals data")
@@ -194,7 +245,7 @@ def test_download_vocals(client: TestClient, db: Session, user_auth: dict) -> No
 
 
 def test_download_instrumental(client: TestClient, db: Session, user_auth: dict) -> None:
-    project = create_project(db, user_auth["user_id"], status="completed")
+    project = create_project(db, user_auth["user_id"], status="COMPLETED")
     file_path = Path(settings.INSTRUMENTAL_DIR) / f"{project.id}.wav"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(b"instrumental data")
@@ -213,7 +264,7 @@ def test_download_enforces_ownership(
     user_auth: dict,
     other_user_auth: dict,
 ) -> None:
-    project = create_project(db, user_auth["user_id"], status="completed")
+    project = create_project(db, user_auth["user_id"], status="COMPLETED")
     file_path = Path(settings.VOCALS_DIR) / f"{project.id}.wav"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(b"vocals data")
@@ -229,7 +280,7 @@ def test_download_missing_file_returns_404(
     db: Session,
     user_auth: dict,
 ) -> None:
-    project = create_project(db, user_auth["user_id"], status="completed")
+    project = create_project(db, user_auth["user_id"], status="COMPLETED")
     file_path = Path(settings.VOCALS_DIR) / f"{project.id}.wav"
     file_path.unlink(missing_ok=True)
 

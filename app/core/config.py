@@ -1,3 +1,5 @@
+import glob
+import logging
 import os
 from urllib.parse import quote_plus
 from typing import Any, Optional
@@ -7,6 +9,19 @@ from dotenv import find_dotenv, load_dotenv
 
 # Load .env file if present
 load_dotenv(find_dotenv())
+
+logger = logging.getLogger(__name__)
+
+def _has_ffmpeg_shared_libs(ffmpeg_bin: str) -> bool:
+    patterns = [
+        "avutil-*.dll",
+        "avcodec-*.dll",
+        "avformat-*.dll",
+        "avfilter-*.dll",
+        "swscale-*.dll",
+        "swresample-*.dll",
+    ]
+    return all(bool(glob.glob(os.path.join(ffmpeg_bin, pattern))) for pattern in patterns)
 
 
 class Settings(BaseModel):
@@ -92,9 +107,25 @@ class Settings(BaseModel):
         os.makedirs(self.INSTRUMENTAL_DIR, exist_ok=True)
 
         # Ensure FFmpeg bin directory is in PATH
-        ffmpeg_bin = r"C:\ffmpeg\ffmpeg-8.1.1-essentials_build\bin"
+        ffmpeg_bin = os.getenv("FFMPEG_BIN", r"C:\ffmpeg\ffmpeg-8.1.1-essentials_build\bin")
         if os.path.exists(ffmpeg_bin) and ffmpeg_bin not in os.environ.get("PATH", ""):
             os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
+
+        if os.path.exists(ffmpeg_bin):
+            ffmpeg_exe = os.path.join(ffmpeg_bin, "ffmpeg.exe")
+            ffprobe_exe = os.path.join(ffmpeg_bin, "ffprobe.exe")
+            if not os.path.exists(ffmpeg_exe) or not os.path.exists(ffprobe_exe):
+                logger.warning(
+                    "FFmpeg bin path %s does not contain ffmpeg.exe or ffprobe.exe. "
+                    "Make sure FFmpeg is installed and FFMPEG_BIN points to the correct shared build.",
+                    ffmpeg_bin,
+                )
+            if not _has_ffmpeg_shared_libs(ffmpeg_bin):
+                logger.warning(
+                    "FFmpeg bin path %s does not appear to contain shared FFmpeg DLLs. "
+                    "TorchCodec requires a full-shared FFmpeg build on Windows (e.g. avutil-*.dll, avcodec-*.dll, avformat-*.dll).",
+                    ffmpeg_bin,
+                )
 
 
 settings = Settings()

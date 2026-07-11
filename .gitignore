@@ -31,3 +31,5 @@ Thumbs.db
 uvicorn.err.log
 uvicorn.out.log
 powershell.cmd
+
+uvicorn*.log

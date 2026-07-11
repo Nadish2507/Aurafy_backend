@@ -8,6 +8,7 @@ python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
 demucs
+torchcodec>=0.14.0
 librosa
 ffmpeg-python
 python-dotenv
